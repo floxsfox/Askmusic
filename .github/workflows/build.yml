@@ -1,0 +1,95 @@
+name: Build Ask Music APK (dari AskMusic.zip)
+
+# Versi ramah-HP: di repo cukup ada 2 file:
+#   1) AskMusic.zip                       (di root repo)
+#   2) .github/workflows/build.yml        (file ini)
+# Workflow akan mengekstrak zip lalu membangun APK-nya.
+
+on:
+  push:
+    branches: ["main", "master"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Opsional: keystore rilis sendiri lewat GitHub Secrets.
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Ekstrak AskMusic.zip
+        run: |
+          test -f AskMusic.zip || { echo "::error::AskMusic.zip tidak ditemukan di root repo"; exit 1; }
+          unzip -q -o AskMusic.zip
+          test -f AskMusic/gradlew || { echo "::error::Isi zip tidak sesuai (AskMusic/gradlew tidak ada)"; exit 1; }
+          ls AskMusic
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          build-root-directory: AskMusic
+
+      - name: Siapkan Android SDK (lisensi + platform 37)
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          PKG=$("$SDKM" --list 2>/dev/null | grep -oE 'platforms;android-37[0-9.]*' | sort -u | head -n 1 || true)
+          if [ -n "$PKG" ]; then yes | "$SDKM" "$PKG" > /dev/null || true; fi
+
+      - name: Siapkan keystore rilis (opsional)
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Beri izin eksekusi gradlew
+        working-directory: AskMusic
+        run: chmod +x gradlew
+
+      - name: Build APK (debug + release)
+        working-directory: AskMusic
+        run: ./gradlew --console=plain assembleDebug assembleRelease
+
+      - name: Kumpulkan APK
+        working-directory: AskMusic
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk dist/AskMusic-release.apk
+          cp app/build/outputs/apk/debug/*.apk dist/AskMusic-debug.apk
+          ls -lh dist
+
+      - name: Upload APK sebagai artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AskMusic-APK
+          path: AskMusic/dist/*.apk
+          if-no-files-found: error
+
+      - name: Buat GitHub Release (hanya untuk tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AskMusic/dist/*.apk
